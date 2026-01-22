@@ -59,7 +59,12 @@ def extract_audio_segment(start_iso: str, end_iso: str, story_id: int, query: st
         relevant_files = []
         for i, file_path in enumerate(audio_files):
             # Parse timestamp from filename: kqed_20260120_050000.mp3
-            ts_str = file_path.stem.split("_", 1)[1]
+            # Use regex to find the YYYYMMDD_HHMMSS pattern regardless of prefix
+            match = re.search(r'(\d{8}_\d{6})', file_path.stem)
+            if not match:
+                continue
+                
+            ts_str = match.group(1)
             file_dt = datetime.strptime(ts_str, "%Y%m%d_%H%M%S")
             
             # File is relevant if its lifetime overlaps with our [start_dt, end_dt] window

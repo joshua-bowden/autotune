@@ -83,6 +83,10 @@ LOOKBACK_CHUNKS: int = 40
 # Prevents memory blowup and huge transcription offsets during long monologues.
 MAX_SEGMENT_DURATION_S: float = 30.0 
 
+# Live Mode settings
+LIVE_MIN_REFRESH_S: float = 0.2
+LIVE_MAX_SPEECH_S: float = 15.0
+
 TRANSCRIPTION_WORKERS: int = 3 # Parallel transcription threads
 ENGINE_HEARTBEAT_INTERVAL_S: int = 30
 # Frame-aligned archival: 16kHz * 60s = 960k samples. Next 576nd multiple is 960,192 (1667 frames)

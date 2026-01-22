@@ -9,18 +9,24 @@ import time
 import subprocess
 import threading
 import requests
+import logging
 import numpy as np
 from datetime import datetime, timedelta
 from queue import Queue
+from collections import deque
 from silero_vad import VADIterator, load_silero_vad
 from moonshine_onnx import MoonshineOnnxModel, load_tokenizer
-import live_constants as lc
+
+import config
+from utils import setup_logging
+
+logger = setup_logging(__name__)
 
 class Transcriber:
     def __init__(self, model_name):
         self.model = MoonshineOnnxModel(model_name=model_name)
         self.tokenizer = load_tokenizer()
-        self.rate = lc.SAMPLING_RATE
+        self.rate = config.VAD_SAMPLING_RATE
         # Warmup
         self.model.generate(np.zeros((1, int(self.rate)), dtype=np.float32))
 
@@ -48,10 +54,9 @@ def write_to_transcript(start_dt, end_dt, text):
     date_str, start_clock = format_timestamp(start_dt)
     _, end_clock = format_timestamp(end_dt)
     
-    # os.makedirs(lc.TRANSCRIPT_DIR, exist_ok=True)
-    # with open(lc.TRANSCRIPT_PATH, "a", encoding="utf-8") as f:
-    #     f.write(f"{date_str}|{start_clock}|{end_clock}|{text.strip()}\n")
-    pass
+    os.makedirs(config.TRANSCRIPT_DIR, exist_ok=True)
+    with open(config.TRANSCRIPT_DIR / "current_transcript.txt", "a", encoding="utf-8") as f:
+        f.write(f"{date_str}|{start_clock}|{end_clock}|{text.strip()}\n")
 
 def run_ffmpeg(pcm_queue, shutdown_event):
     """Pipes raw stream bytes to ffmpeg and reads back PCM."""
@@ -59,7 +64,7 @@ def run_ffmpeg(pcm_queue, shutdown_event):
         "ffmpeg",
         "-i", "pipe:0",          # Input from stdin
         "-f", "s16le",          # Output format raw pcm 16-bit
-        "-ar", str(lc.SAMPLING_RATE),
+        "-ar", str(config.VAD_SAMPLING_RATE),
         "-ac", "1",             # Mono
         "pipe:1"                # Output to stdout
     ]
@@ -74,7 +79,7 @@ def run_ffmpeg(pcm_queue, shutdown_event):
     
     def read_pcm():
         pcm_buffer = bytearray()
-        byte_chunk_size = lc.CHUNK_SIZE * 2
+        byte_chunk_size = config.VAD_CHUNK_SIZE * 2
         while not shutdown_event.is_set():
             try:
                 chunk = proc.stdout.read(byte_chunk_size)
@@ -93,155 +98,172 @@ def run_ffmpeg(pcm_queue, shutdown_event):
     threading.Thread(target=read_pcm, daemon=True).start()
     return proc
 
-caption_cache = []
+class LiveTranscriberEngine:
+    def __init__(self, model_name):
+        self.transcribe = Transcriber(model_name)
+        self.vad_model = load_silero_vad(onnx=True)
+        self.vad_iterator = VADIterator(
+            model=self.vad_model,
+            sampling_rate=config.VAD_SAMPLING_RATE,
+            threshold=config.VAD_THRESHOLD,
+            min_silence_duration_ms=config.VAD_MIN_SILENCE_MS,
+        )
+        
+        self.pcm_queue = Queue()
+        self.shutdown_event = threading.Event()
+        self.ffmpeg_proc = None
+        
+        self.speech_buffer = []
+        self.recording = False
+        self.session_start = None
+        self.total_samples_processed = 0
+        self.segment_start_samples = 0
+        self.anchor_points = []
+        
+        self.mp3_buffer = bytearray()
+        self.samples_at_last_archive = 0
+        
+        self.last_refresh_time = time.time()
+        self.lookback_buffer = deque(maxlen=config.LOOKBACK_CHUNKS)
 
-def print_captions(text):
-    """Prints right justified on same line, prepending cached captions."""
-    width = lc.MAX_LINE_LENGTH
-    if len(text) < width:
-        for caption in caption_cache[::-1]:
-            text = caption + " " + text
-            if len(text) > width:
-                break
-    if len(text) > width:
-        text = text[-width:]
-    else:
-        text = " " * (width - len(text)) + text
-    print("\r" + (" " * width) + "\r" + text, end="", flush=True)
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default=lc.MOONSHINE_MODEL, choices=["moonshine/base", "moonshine/tiny"])
-    args = parser.parse_args()
-
-    transcribe = Transcriber(args.model)
-    vad_model = load_silero_vad(onnx=True)
-    vad_iterator = VADIterator(
-        model=vad_model,
-        sampling_rate=lc.SAMPLING_RATE,
-        threshold=0.5,
-        min_silence_duration_ms=400,
-    )
-
-    pcm_queue = Queue()
-    shutdown_event = threading.Event()
-    ffmpeg_proc = run_ffmpeg(pcm_queue, shutdown_event)
-
-    speech_buffer = np.empty(0, dtype=np.float32)
-    recording = False
-    
-    session_start = None
-    total_samples_processed = 0
-    
-    # State for current speech segment
-    segment_start_samples = 0
-    period_timestamps = []  
-    last_period_count = 0
-    
-    last_refresh_time = time.time()
-
-    def commit_segment(final_text, segment_end_samples):
-        nonlocal segment_start_samples, period_timestamps
-        if not final_text.strip():
+    def save_archive_chunk(self):
+        """Saves the current MP3 buffer with a filename anchored to the stream start."""
+        if not self.mp3_buffer or self.session_start is None:
             return
             
-        # Add to display cache
-        caption_cache.append(final_text.strip())
+        chunk_start_dt = self.session_start + timedelta(seconds=self.samples_at_last_archive / config.VAD_SAMPLING_RATE)
+        timestamp_str = chunk_start_dt.strftime("%Y%m%d_%H%M%S")
         
-        sentences = [s.strip() + "." for s in final_text.split(".") if s.strip()]
-        if not sentences:
-            return
-
-        current_start = segment_start_samples
+        filename = f"kqed_{timestamp_str}.mp3"
+        filepath = config.AUDIO_DIR / filename
         
-        for i, sentence in enumerate(sentences):
-            if i < len(period_timestamps):
-                end_samples = period_timestamps[i]
-            else:
-                remaining = len(sentences) - i
-                progress = (segment_end_samples - current_start) / remaining
-                end_samples = int(current_start + progress)
-
-            if end_samples <= current_start:
-                end_samples = current_start + 1
-
-            start_dt = session_start + timedelta(seconds=current_start / lc.SAMPLING_RATE)
-            end_dt = session_start + timedelta(seconds=end_samples / lc.SAMPLING_RATE)
+        try:
+            with open(filepath, "wb") as f:
+                f.write(self.mp3_buffer)
+            logger.info(f"Archived audio: {filename} ({len(self.mp3_buffer)/(1024*1024):.2f} MB)")
             
-            write_to_transcript(start_dt, end_dt, sentence)
-            current_start = end_samples
+            self.mp3_buffer = bytearray() 
+            self.samples_at_last_archive = self.total_samples_processed
+        except IOError as e:
+            logger.error(f"Failed to save archive: {e}")
+
+    def commit_segment(self, final_text, segment_end_samples):
+        final_text = final_text.strip()
+        if not final_text:
+            self.anchor_points = []
+            return
+            
+        final_words = final_text.split()
+        valid_anchors = []
+        last_pos, last_ts = -1, -1
         
-        segment_start_samples = segment_end_samples
-        period_timestamps.clear()
+        for pos, word, ts in self.anchor_points:
+            if pos < len(final_words) and final_words[pos] == word:
+                if pos > last_pos and ts > last_ts:
+                    valid_anchors.append((pos, ts))
+                    last_pos, last_ts = pos, ts
 
-    try:
-        with requests.get(lc.STREAM_URL, stream=True, timeout=20) as r:
-            r.raise_for_status()
+        curr_start_samples = self.segment_start_samples
+        curr_word_idx = 0
+        
+        for pos, ts in valid_anchors:
+            chunk_text = " ".join(final_words[curr_word_idx : pos + 1])
+            if chunk_text.strip():
+                start_dt = self.session_start + timedelta(seconds=curr_start_samples / config.VAD_SAMPLING_RATE)
+                end_dt = self.session_start + timedelta(seconds=ts / config.VAD_SAMPLING_RATE)
+                write_to_transcript(start_dt, end_dt, chunk_text)
+            curr_start_samples, curr_word_idx = ts, pos + 1
+            
+        if curr_word_idx < len(final_words):
+            chunk_text = " ".join(final_words[curr_word_idx:])
+            if chunk_text.strip():
+                start_dt = self.session_start + timedelta(seconds=curr_start_samples / config.VAD_SAMPLING_RATE)
+                end_dt = self.session_start + timedelta(seconds=segment_end_samples / config.VAD_SAMPLING_RATE)
+                write_to_transcript(start_dt, end_dt, chunk_text)
 
-            for chunk in r.iter_content(chunk_size=4096):
-                if not chunk: continue
-                
-                try:
-                    ffmpeg_proc.stdin.write(chunk)
-                    ffmpeg_proc.stdin.flush()
-                except BrokenPipeError:
-                    break
+        self.segment_start_samples = segment_end_samples
+        self.anchor_points = []
 
-                while not pcm_queue.empty():
-                    pcm_chunk = pcm_queue.get()
-                    if session_start is None:
-                        session_start = datetime.now()
+    def run(self):
+        self.ffmpeg_proc = run_ffmpeg(self.pcm_queue, self.shutdown_event)
+        
+        logger.info(f"Connecting to stream for live transcription: {config.STREAM_URL}")
+        try:
+            with requests.get(config.STREAM_URL, stream=True, timeout=20) as r:
+                r.raise_for_status()
+
+                for chunk in r.iter_content(chunk_size=4096):
+                    if self.shutdown_event.is_set(): break
+                    if not chunk: continue
                     
-                    total_samples_processed += len(pcm_chunk)
-                    
-                    speech_dict = vad_iterator(pcm_chunk)
-                    
-                    if speech_dict:
-                        if "start" in speech_dict and not recording:
-                            recording = True
-                            segment_start_samples = total_samples_processed
-                            speech_buffer = np.empty(0, dtype=np.float32)
-                            period_timestamps = []
-                            last_period_count = 0
-                            last_refresh_time = time.time()
+                    self.mp3_buffer.extend(chunk)
+                    try:
+                        self.ffmpeg_proc.stdin.write(chunk)
+                        self.ffmpeg_proc.stdin.flush()
+                    except BrokenPipeError: break
+
+                    while not self.pcm_queue.empty():
+                        pcm_chunk = self.pcm_queue.get()
+                        if self.session_start is None:
+                            self.session_start = datetime.now()
                         
-                        if "end" in speech_dict and recording:
-                            recording = False
-                            text = transcribe(speech_buffer)
-                            commit_segment(text, total_samples_processed)
-                            print_captions("") # Finalize visual
-                            vad_iterator.reset_states()
+                        if not self.recording:
+                            self.lookback_buffer.append(pcm_chunk)
 
-                    if recording:
-                        speech_buffer = np.concatenate((speech_buffer, pcm_chunk))
+                        speech_dict = self.vad_iterator(pcm_chunk)
                         
-                        if (time.time() - last_refresh_time) > lc.MIN_REFRESH_SECS:
-                            text = transcribe(speech_buffer)
-                            print_captions(text)
+                        if speech_dict:
+                            if "start" in speech_dict and not self.recording:
+                                self.recording = True
+                                lookback_samples = sum(len(c) for c in self.lookback_buffer)
+                                self.segment_start_samples = self.total_samples_processed - lookback_samples
+                                self.speech_buffer = list(self.lookback_buffer)
+                                self.anchor_points = []
+                                self.last_refresh_time = time.time()
                             
-                            current_period_count = text.count(".")
-                            if current_period_count > last_period_count:
-                                for _ in range(current_period_count - last_period_count):
-                                    period_timestamps.append(total_samples_processed)
-                                last_period_count = current_period_count
-                            
-                            last_refresh_time = time.time()
+                            if "end" in speech_dict and self.recording:
+                                self.recording = False
+                                full_speech = np.concatenate(self.speech_buffer)
+                                text = self.transcribe(full_speech)
+                                self.commit_segment(text, self.total_samples_processed)
+                                self.speech_buffer = []
+                                self.vad_iterator.reset_states()
 
-                        if (len(speech_buffer) / lc.SAMPLING_RATE) > lc.MAX_SPEECH_SECS:
-                            text = transcribe(speech_buffer)
-                            commit_segment(text, total_samples_processed)
-                            recording = False 
-                            print_captions("")
-                            # Soft reset logic
-                            vad_iterator.triggered = False
-                            vad_iterator.temp_end = 0
-                            vad_iterator.current_sample = 0
+                        if self.recording:
+                            self.speech_buffer.append(pcm_chunk)
+                            if (time.time() - self.last_refresh_time) > config.LIVE_MIN_REFRESH_S:
+                                current_ts = self.total_samples_processed
+                                full_speech = np.concatenate(self.speech_buffer)
+                                text = self.transcribe(full_speech)
+                                words = text.split()
+                                if words:
+                                    self.anchor_points.append((len(words) - 1, words[-1], current_ts))
+                                self.last_refresh_time = time.time()
 
-    except KeyboardInterrupt:
-        print("\nStopping...")
-    finally:
-        shutdown_event.set()
-        ffmpeg_proc.terminate()
+                            if (sum(len(c) for c in self.speech_buffer) / config.VAD_SAMPLING_RATE) > config.LIVE_MAX_SPEECH_S:
+                                full_speech = np.concatenate(self.speech_buffer)
+                                text = self.transcribe(full_speech)
+                                self.commit_segment(text, self.total_samples_processed)
+                                # Start next segment immediately with empty buffer
+                                self.speech_buffer = []
+                                self.vad_iterator.reset_states()
+                        
+                        self.total_samples_processed += len(pcm_chunk)
+                        
+                        if (self.total_samples_processed - self.samples_at_last_archive) >= config.SAMPLES_PER_ARCHIVE:
+                            self.save_archive_chunk()
+
+        except KeyboardInterrupt:
+            logger.info("\nStopping live transcriber...")
+        finally:
+            self.save_archive_chunk()
+            self.shutdown_event.set()
+            if self.ffmpeg_proc: self.ffmpeg_proc.terminate()
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", default="moonshine/tiny", choices=["moonshine/base", "moonshine/tiny"])
+    args = parser.parse_args()
+
+    engine = LiveTranscriberEngine(args.model)
+    engine.run()
