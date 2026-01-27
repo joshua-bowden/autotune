@@ -17,6 +17,8 @@ import shutil
 import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+import re
+from datetime import datetime, timedelta
 
 from google import genai
 from google.genai import types
@@ -117,7 +119,9 @@ def save_processed_index(index: int):
 def get_sentences_from_file(count: int, start_index: int) -> List[Dict[str, Any]]:
     """
     Read N sentences from the transcript file starting from a specific index.
-    Handles # SESSION markers to anchor sample offsets.
+    Parses transcript lines.
+    Supported formats:
+    - YYMMDD_HHMMSS|START_SAMPLES|END_SAMPLES|text
     
     Args:
         count: Number of sentences to read
@@ -130,7 +134,6 @@ def get_sentences_from_file(count: int, start_index: int) -> List[Dict[str, Any]
         return []
         
     sentences = []
-    current_session = "unknown"
     sentence_counter = 0
     
     try:
@@ -140,33 +143,41 @@ def get_sentences_from_file(count: int, start_index: int) -> List[Dict[str, Any]
                 if not line:
                     continue
                     
-                if line.startswith("# SESSION "):
-                    current_session = "kqed_" + line.replace("# SESSION ", "").strip()
-                    continue
-                
-                # It's a sentence line: start_samples|end_samples|text
+                # Sentence line
                 if sentence_counter < start_index:
                     sentence_counter += 1
                     continue
-                
-                parts = line.split("|", 2)
-                if len(parts) == 3:
-                    try:
-                        start_s = int(parts[0])
-                        end_s = int(parts[1])
-                        
-                        sentences.append({
-                            "session_id": current_session,
-                            "start_samples": start_s,
-                            "end_samples": end_s,
-                            "start": start_s / config.VAD_SAMPLING_RATE,
-                            "end": end_s / config.VAD_SAMPLING_RATE,
-                            "text": parts[2],
-                            "timestamp": current_session
-                        })
-                        sentence_counter += 1
-                    except ValueError:
-                        continue
+
+                parts = line.split("|")
+                if len(parts) < 4:
+                    continue
+
+                ts = parts[0]
+                if not re.fullmatch(r"\d{6}_\d{6}", ts):
+                    # No backwards compatibility: skip non-conforming lines
+                    continue
+
+                try:
+                    start_s = int(parts[1])
+                    end_s = int(parts[2])
+                    text = "|".join(parts[3:])
+                except ValueError:
+                    continue
+
+                # Expand YY -> YYYY for session matching & ISO computation
+                expanded = "20" + ts  # 20YYMMDD_HHMMSS
+                session_id = "kqed_" + expanded
+
+                sentences.append({
+                    "session_id": session_id,
+                    "start_samples": start_s,
+                    "end_samples": end_s,
+                    "start": start_s / config.VAD_SAMPLING_RATE,
+                    "end": end_s / config.VAD_SAMPLING_RATE,
+                    "text": text,
+                    "timestamp": expanded,
+                })
+                sentence_counter += 1
                 
                 if len(sentences) >= count:
                     break
@@ -309,10 +320,8 @@ def process_sentences() -> bool:
             
         # Prepare detailed metadata for audio clipping
         try:
-            from datetime import datetime, timedelta
-            
-            # The session_id is YYYYMMDD_HHMMSS
-            session_id = matching_segments[0]["session_id"]
+            # Session ID (prefer per-line timestamp-derived session_id)
+            session_id = matching_segments[0].get("session_id") or "unknown"
             start_samples = matching_segments[0]["start_samples"]
             end_samples = matching_segments[-1]["end_samples"]
             

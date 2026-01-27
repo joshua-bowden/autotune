@@ -20,24 +20,21 @@ TRANSCRIPT_FILE = config.TRANSCRIPT_DIR / "current_transcript.txt"
 def parse_transcript_line(line, active_session=None):
     """
     Parses a line from current_transcript.txt:
-    START_SAMPLES|END_SAMPLES|text
-    Or a session marker: # SESSION YYYYMMDD_HHMMSS
+    YYMMDD_HHMMSS|START_SAMPLES|END_SAMPLES|text
     Returns (session_id, None, text, start_samples, end_samples)
     """
     line = line.strip()
-    if line.startswith("# SESSION "):
-        session_id = line.replace("# SESSION ", "").strip()
-        return session_id, "MARKER", None, None, None
-        
     parts = line.split('|')
-    if len(parts) < 3:
+    if len(parts) < 4:
         return None
     
     try:
-        start_samples = int(parts[0])
-        end_samples = int(parts[1])
-        text = "|".join(parts[2:])
-        return active_session, None, text, start_samples, end_samples
+        ts = parts[0]
+        session_id = "kqed_" + ("20" + ts)  # YY -> YYYY
+        start_samples = int(parts[1])
+        end_samples = int(parts[2])
+        text = "|".join(parts[3:])
+        return session_id, None, text, start_samples, end_samples
     except Exception as e:
         logger.error(f"Error parsing line: {line}. Error: {e}")
         return None
@@ -108,7 +105,7 @@ def main():
                 if moonshine_text:
                     print(f"    Moonshine: {moonshine_text}")
                 else:
-                    print(f"    Moonshine: [transcription failed]")
+                    print(f"    Moonshine: NO TEXT")
                 print()
             else:
                 print(f"{i+1:2d}. Original: {text}")

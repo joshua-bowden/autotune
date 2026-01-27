@@ -58,6 +58,21 @@ def extract_audio_segment(story_id: int, query: str = "clip", start_samples: Opt
             
         relevant_files = []
         
+        def sessions_match(file_session: str, target: str) -> bool:
+            """
+            Match session IDs allowing optional microseconds in filenames.
+            Examples:
+            - target: kqed_20260127_123456 matches file: kqed_20260127_123456_123456
+            """
+            if file_session == target:
+                return True
+            # Allow either side to include microseconds suffix
+            if file_session.startswith(target + "_"):
+                return True
+            if target.startswith(file_session + "_"):
+                return True
+            return False
+
         # Use provided session_id or assume the latest one found in the files
         target_session = session_id
         if target_session and not target_session.startswith("kqed_"):
@@ -72,7 +87,7 @@ def extract_audio_segment(story_id: int, query: str = "clip", start_samples: Opt
             session_str = match.group(1)
             offset_samples = int(match.group(2))
             
-            if target_session and session_str != target_session:
+            if target_session and not sessions_match(session_str, target_session):
                 continue # Only stick to the specified session
                 
             # Sample-based check

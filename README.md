@@ -61,9 +61,8 @@ The search utility will automatically extract the exact audio clip for each resu
 
 ## Data Structure
 
-- **Transcript Format**: `START_SAMPLES|END_SAMPLES|text`
+- **Transcript Format**: `YYMMDD_HHMMSS|START_SAMPLES|END_SAMPLES|text`
 - **Archive Filename**: `kqed_YYYYMMDD_HHMMSS_OFFSET.mp3`
-- **Session Markers**: `# SESSION YYYYMMDD_HHMMSS` ensures resets are handled gracefully.
 
 ## License
 Educational and personal use.

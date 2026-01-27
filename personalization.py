@@ -56,10 +56,11 @@ def create_personalization():
         
         logger.info(f"Extracting clip for story {story_id}: {summary[:50]}...")
         clip_path = extract_audio_segment(
-            audio_meta["start_time"],
-            audio_meta["end_time"],
-            story_id,
-            query=f"dist_story_{i}_{story_id}"
+            story_id=story_id,
+            query=f"dist_story_{i}_{story_id}",
+            start_samples=audio_meta.get("start_samples"),
+            end_samples=audio_meta.get("end_samples"),
+            session_id=audio_meta.get("session_id"),
         )
         if clip_path:
             clips.append(clip_path)
