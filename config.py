@@ -90,7 +90,7 @@ SILENCE_ANNOUNCE_S: float = 3.0
 SAMPLES_PER_ARCHIVE: int = 960000 
 
 # Story Processing (processor.py)
-WINDOW_SIZE_SENTENCES: int = 100
+WINDOW_SIZE_SENTENCES: int = 500
 OVERLAP_SENTENCES: int = 0
 MIN_STORY_LENGTH: int = 10  # Minimum characters for a valid story
 MONITOR_INTERVAL_S: int = 5  # Seconds between directory scans

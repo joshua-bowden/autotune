@@ -59,9 +59,14 @@ def segment_transcripts(combined_text: str) -> Optional[List[Dict[str, str]]]:
     
     Your goal is identifying sharp, complete stories that can stand alone as a short radio highlight clip.
     A proper story is a hook that introduces the topic, talks briefly about it, and leaves the listener wanting to hear more.
+    A story should be less than 10 sentences long.
     
     While there are likely transcription errors, make sure that your selected story starts with good grammar
     at the beginning of a sentence and ends at the end of a sentence.
+
+    If there is a NO TEXT DETECTED FOR X SEC, it may be story-relevant noise that can be very engaging.
+    Look before and after to deduce if it is filler noise or story-relevant.
+    If it is story-relevant, include it in the story.
 
     CRITICAL INSTRUCTIONS:
     1. If the transcript contains multiple stories that satisfy this criteria, split them into separate story objects.
