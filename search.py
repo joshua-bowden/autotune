@@ -35,72 +35,114 @@ EXCERPT_LENGTH = config.SEARCH_EXCERPT_LENGTH
 CLIP_PADDING_MS = config.CLIP_PADDING_MS
 
 
-def extract_audio_segment(start_iso: str, end_iso: str, story_id: int, query: str = "clip") -> Optional[str]:
+def extract_audio_segment(story_id: int, query: str = "clip", start_samples: Optional[int] = None, end_samples: Optional[int] = None, session_id: Optional[str] = None) -> Optional[str]:
     """
     Finds relevant MP3 chunks, concatenates them, and clips to the exact story range.
+    Uses sample offsets and an optional session_id for 100% timing accuracy.
     """
     try:
         # Sanitize query for filename
-        safe_query = re.sub(r'[^\w\s-]', '', query).strip().replace(' ', '_')[:30]
+        safe_query = re.sub(r'[^\w\s-]', '', query).strip().replace(' ', '_')
         
-        # 1. Expand range based on requested padding
-        base_start_dt = datetime.fromisoformat(start_iso)
-        base_end_dt = datetime.fromisoformat(end_iso)
+        if start_samples is None or end_samples is None:
+            logger.error("start_samples and end_samples are required for clipping")
+            return None
+            
+        padding_ms = CLIP_PADDING_MS
         
-        start_dt = base_start_dt - timedelta(milliseconds=CLIP_PADDING_MS)
-        end_dt = base_end_dt + timedelta(milliseconds=CLIP_PADDING_MS)
-        
-        # 2. Find relevant files covering the EXPANDED range
-        audio_files = sorted(list(config.AUDIO_DIR.glob("kqed_*.mp3")))
+        # 2. Find relevant files
+        audio_files = sorted(list(config.AUDIO_DIR.glob("kqed_*.mp3")), reverse=True) # Check newest first
         if not audio_files:
             logger.warning("No audio files found for clipping")
             return None
             
         relevant_files = []
+        
+        # Use provided session_id or assume the latest one found in the files
+        target_session = session_id
+        if target_session and not target_session.startswith("kqed_"):
+            target_session = "kqed_" + target_session
+        
         for i, file_path in enumerate(audio_files):
-            # Parse timestamp from filename: kqed_20260120_050000.mp3
-            # Use regex to find the YYYYMMDD_HHMMSS pattern regardless of prefix
-            match = re.search(r'(\d{8}_\d{6})', file_path.stem)
-            if not match:
-                continue
+            # Parse format: kqed_YYYYMMDD_HHMMSS[_ffffff]_OFFSET.mp3
+            # Supports both legacy and new high-precision session IDs
+            match = re.search(r'(kqed_\d{8}_\d{6}(?:_\d{6})?)_(\d{12})', file_path.stem)
+            if not match: continue
                 
-            ts_str = match.group(1)
-            file_dt = datetime.strptime(ts_str, "%Y%m%d_%H%M%S")
+            session_str = match.group(1)
+            offset_samples = int(match.group(2))
             
-            # File is relevant if its lifetime overlaps with our [start_dt, end_dt] window
-            file_end_dt = file_dt + timedelta(seconds=config.CHUNK_DURATION + 1) # +1s wiggle for safety
+            if target_session and session_str != target_session:
+                continue # Only stick to the specified session
+                
+            # Sample-based check
+            padding_samples = int((padding_ms / 1000.0) * config.VAD_SAMPLING_RATE)
+            s_start = start_samples - padding_samples
+            s_end = end_samples + padding_samples
             
-            if file_dt < end_dt and file_end_dt > start_dt:
-                relevant_files.append((file_dt, file_path))
+            f_start = offset_samples
+            f_end = offset_samples + config.SAMPLES_PER_ARCHIVE
+            
+            if f_start < s_end and f_end > s_start:
+                if not target_session: target_session = session_str
+                relevant_files.append((offset_samples, file_path))
         
         if not relevant_files:
-            logger.warning(f"No audio files found covering expanded range {start_dt} to {end_dt}")
+            logger.warning(f"No audio files found for range samples=[{start_samples}, {end_samples}] session_id={session_id}")
             return None
+            
+        # Sort back to chronological order
+        relevant_files.sort(key=lambda x: x[0])
             
         # 3. Concatenate relevant files
         combined = AudioSegment.empty()
-        first_file_dt = relevant_files[0][0]
-        
         for _, file_path in relevant_files:
             segment = AudioSegment.from_mp3(str(file_path))
             combined += segment
             
-        # 4. Calculate final clip offsets relative to the concatenated start
-        start_offset_ms = int((start_dt - first_file_dt).total_seconds() * 1000)
-        duration_ms = int((end_dt - start_dt).total_seconds() * 1000)
+        # 4. Calculate final clip offsets using GROUND TRUTH samples
+        first_file_sample_offset = relevant_files[0][0]
+        padding_samples = int((padding_ms / 1000.0) * config.VAD_SAMPLING_RATE)
         
-        # Clamp to available audio bounds
-        final_start = max(0, start_offset_ms)
-        final_end = min(len(combined), start_offset_ms + duration_ms)
+        final_start_samples = (start_samples - padding_samples) - first_file_sample_offset
+        final_end_samples = (end_samples + padding_samples) - first_file_sample_offset
+        
+        final_start = max(0, int((final_start_samples / config.VAD_SAMPLING_RATE) * 1000))
+        final_end = min(len(combined), int((final_end_samples / config.VAD_SAMPLING_RATE) * 1000))
+        
+        # Ensure we have a valid clip (at least 100ms)
+        if final_end <= final_start:
+            logger.error(f"Invalid clip range: start={final_start}ms, end={final_end}ms")
+            return None
+        
+        if final_end - final_start < 100:  # Minimum 100ms for valid MP3
+            logger.warning(f"Clip too short ({final_end - final_start}ms), expanding to 100ms")
+            final_end = final_start + 100
+            if final_end > len(combined):
+                final_start = max(0, len(combined) - 100)
+                final_end = len(combined)
         
         clipped = combined[final_start:final_end]
         
-        # 4. Save result
-        results_dir = config.DATA_DIR / "results"
+        # 5. Save result with proper MP3 encoding
+        results_dir = config.RESULTS_DIR
         results_dir.mkdir(exist_ok=True)
         
         output_path = results_dir / f"{safe_query}.mp3"
-        clipped.export(str(output_path), format="mp3")
+        
+        # Export with explicit parameters to ensure complete, valid MP3 files
+        # Use bitrate and parameters that ensure proper MP3 encoding
+        clipped.export(
+            str(output_path),
+            format="mp3",
+            bitrate="128k",
+            parameters=["-q:a", "2"]  # High quality encoding
+        )
+        
+        # Verify the file was created and has content
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            logger.error(f"Failed to create valid MP3 file: {output_path}")
+            return None
         
         return str(output_path)
         
@@ -132,21 +174,20 @@ def format_search_results(results: List[Dict[str, Any]]) -> str:
         # Parse audio metadata
         try:
             audio_metadata = json.loads(audio_path)
-            files = audio_metadata.get("files", [])
-            start_ts = audio_metadata.get("start_timestamp", "Unknown")
-            duration = audio_metadata.get("duration_seconds", 0)
+            start_iso = audio_metadata.get("start_time", "Unknown")
+            duration = audio_metadata.get("duration", 0)
             
             # Format timestamp for display
-            if start_ts != "Unknown":
+            if start_iso != "Unknown":
                 try:
-                    dt = datetime.fromisoformat(start_ts)
+                    dt = datetime.fromisoformat(start_iso)
                     time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
                 except:
-                    time_str = start_ts
+                    time_str = start_iso
             else:
                 time_str = "Unknown"
             
-            audio_info = f"{time_str} ({duration}s, {len(files)} file{'s' if len(files) != 1 else ''})"
+            audio_info = f"{time_str} ({duration:.1f}s)"
         except (json.JSONDecodeError, TypeError):
             audio_info = "Metadata unavailable"
         
@@ -189,7 +230,7 @@ def search_stories(query: str, top_k: int = DEFAULT_TOP_K) -> None:
     if not results:
         print("No results found.")
         return
-
+    
     print(f"\nFound {len(results)} results:\n")
     
     for i, result in enumerate(results, 1):
@@ -203,15 +244,15 @@ def search_stories(query: str, top_k: int = DEFAULT_TOP_K) -> None:
         audio_saved_at = None
         try:
             audio_meta = json.loads(audio_path)
-            if "start_time" in audio_meta and "end_time" in audio_meta:
-                # Clip the audio for this story
-                print(f"[{i}] Clipping audio for: {summary[:50]}...")
-                audio_saved_at = extract_audio_segment(
-                    audio_meta["start_time"], 
-                    audio_meta["end_time"], 
-                    story_id,
-                    query=f"{query}_result{i}_story{story_id}"
-                )
+            # Clip the audio for this story
+            print(f"[{i}] Clipping audio for: {summary[:50]}...")
+            audio_saved_at = extract_audio_segment(
+                story_id,
+                query=f"{query[:10]}_result{i}_s{story_id}",
+                start_samples=audio_meta.get("start_samples"),
+                end_samples=audio_meta.get("end_samples"),
+                session_id=audio_meta.get("session_id")
+            )
         except Exception as e:
             logger.debug(f"Could not clip audio for result {i}: {e}")
         

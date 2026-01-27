@@ -1,8 +1,8 @@
 """
 Service orchestration module for the radio archiver system.
 
-This module starts and manages all radio archiver services:
-- Unified Streaming Engine (Capture, Archiver, Transcription)
+This module starts and manages the radio archiver services:
+- Live Transcriber (Capture, Archiver, Transcription)
 - Story processing and embedding using Gemini
 
 All services run as separate processes and are monitored for health.
@@ -10,14 +10,12 @@ The orchestrator handles graceful shutdown and basic process recovery.
 """
 
 import logging
-import argparse
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import List, Tuple
 
-import config
 import database
 from utils import setup_logging
 
@@ -87,7 +85,6 @@ class ServiceManager:
                     
                     # Determine script name from service name
                     script_map = {
-                        "Streaming Engine": "engine.py",
                         "Live Transcriber": "live_transcriber.py",
                         "Story Processing": "processor.py"
                     }
@@ -130,34 +127,13 @@ class ServiceManager:
         logger.info("All services stopped")
 
 
-def run_services(live_mode: bool = False) -> None:
+def run_services() -> None:
     """
     Start and monitor all radio archiver services.
     
     Runs until interrupted by user (Ctrl+C) or critical error.
     Automatically restarts failed services up to MAX_RESTART_ATTEMPTS times.
     """
-    logger.info("=" * 70)
-    logger.info("Radio Archiver Service Orchestrator")
-    logger.info("=" * 70)
-    logger.info("")
-    logger.info("WHAT GETS EMBEDDED:")
-    logger.info("  - Each story's summary + full transcript text (concatenated)")
-    logger.info("  - Gemini segments 5-minute batches into distinct stories")
-    logger.info("  - Each story gets its own 768-dimensional embedding vector")
-    logger.info("")
-    logger.info("WHAT GETS STORED IN DATABASE:")
-    logger.info("  - Story transcript (full text)")
-    logger.info("  - Story summary (AI-generated title)")
-    logger.info("  - Audio metadata (filenames + timestamps)")
-    logger.info("  - Embedding vector (for semantic search)")
-    logger.info("")
-    logger.info("SERVICES:")
-    logger.info("  1. Streaming Engine  - Real-time capture, archiving, and transcription")
-    logger.info("  2. Story Processing  - Segments, summarizes, embeds using Gemini")
-    logger.info("=" * 70)
-    logger.info("")
-    
     manager = ServiceManager()
     
     # Ensure database is initialized
@@ -167,11 +143,7 @@ def run_services(live_mode: bool = False) -> None:
         return
 
     # Start all services
-    if live_mode:
-        manager.start_service("live_transcriber.py", "Live Transcriber")
-    else:
-        manager.start_service("engine.py", "Streaming Engine")
-    
+    manager.start_service("live_transcriber.py", "Live Transcriber")
     manager.start_service("processor.py", "Story Processing")
     
     logger.info("\nAll services started successfully")
@@ -191,8 +163,4 @@ def run_services(live_mode: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Radio Archiver Service Orchestrator")
-    parser.add_argument("--live", action="store_true", help="Use live microphone transcription instead of stream")
-    args = parser.parse_args()
-    
-    run_services(live_mode=args.live)
+    run_services()

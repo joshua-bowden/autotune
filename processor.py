@@ -53,9 +53,13 @@ def segment_transcripts(combined_text: str) -> Optional[List[Dict[str, str]]]:
     """
     prompt = f"""
     You are an editor for a radio station.
-    Below is a transcript of a continuous live radio feed, provided as a numbered list of sentences. 
+    Below is a transcript of a continuous live radio feed, provided as a numbered list of sentence fragments. 
+    
     Your goal is identifying sharp, complete stories that can stand alone as a short radio highlight clip.
     A proper story is a hook that introduces the topic, talks briefly about it, and leaves the listener wanting to hear more.
+    
+    While there are likely transcription errors, make sure that your selected story starts with good grammar
+    at the beginning of a sentence and ends at the end of a sentence.
 
     CRITICAL INSTRUCTIONS:
     1. If the transcript contains multiple stories that satisfy this criteria, split them into separate story objects.
@@ -91,22 +95,6 @@ def segment_transcripts(combined_text: str) -> Optional[List[Dict[str, str]]]:
         return None
 
 
-def parse_clock_to_seconds(hhmmss_ss: str) -> float:
-    """Convert HHMMSS.ss string back to float seconds for the day."""
-    try:
-        parts = hhmmss_ss.split(".")
-        time_part = parts[0]
-        ms_part = float("0." + parts[1]) if len(parts) > 1 else 0.0
-        
-        hours = int(time_part[:2])
-        mins = int(time_part[2:4])
-        secs = int(time_part[4:6])
-        
-        return hours * 3600 + mins * 60 + secs + ms_part
-    except (ValueError, IndexError):
-        return 0.0
-
-
 def get_last_processed_index() -> int:
     """Read the last processed line index from state file."""
     if not STATE_FILE.exists():
@@ -129,56 +117,60 @@ def save_processed_index(index: int):
 def get_sentences_from_file(count: int, start_index: int) -> List[Dict[str, Any]]:
     """
     Read N sentences from the transcript file starting from a specific index.
+    Handles # SESSION markers to anchor sample offsets.
     
     Args:
         count: Number of sentences to read
-        start_index: Line index to start reading from (0-indexed)
+        start_index: Sentence index to start reading from (0-indexed, excludes markers)
         
     Returns:
-        List of dictionaries with keys: timestamp, start, end, text
+        List of dictionaries with keys: session_id, start_samples, end_samples, start, end, text
     """
     if not TRANSCRIPT_FILE.exists():
         return []
         
     sentences = []
+    current_session = "unknown"
+    sentence_counter = 0
+    
     try:
         with open(TRANSCRIPT_FILE, "r", encoding="utf-8") as f:
-            # Skip to start_index
-            for _ in range(start_index):
-                if not f.readline():
-                    return []
-            
-            # Read 'count' lines
-            for _ in range(count):
-                line = f.readline()
+            for line in f:
+                line = line.strip()
                 if not line:
-                    break
-                
-                # New format: 0:date|1:start_hhmmss.ss|2:end_hhmmss.ss|3:text
-                parts = line.strip().split("|", 3)
-                if len(parts) == 4:
-                    start_s = parse_clock_to_seconds(parts[1])
-                    end_s = parse_clock_to_seconds(parts[2])
+                    continue
                     
-                    sentences.append({
-                        "date": parts[0],
-                        "start_hhmmss": parts[1],
-                        "end_hhmmss": parts[2],
-                        "start": start_s,
-                        "end": end_s,
-                        "text": parts[3],
-                        # Use first sentence timestamp as session_id fallback
-                        "timestamp": f"{parts[0]}_{parts[1].split('.')[0]}" 
-                    })
-                else:
-                    # Generic fallback
-                    sentences.append({
-                        "timestamp": "unknown",
-                        "start": 0.0,
-                        "end": 0.0,
-                        "text": line.strip()
-                    })
-    except (IOError, ValueError) as e:
+                if line.startswith("# SESSION "):
+                    current_session = "kqed_" + line.replace("# SESSION ", "").strip()
+                    continue
+                
+                # It's a sentence line: start_samples|end_samples|text
+                if sentence_counter < start_index:
+                    sentence_counter += 1
+                    continue
+                
+                parts = line.split("|", 2)
+                if len(parts) == 3:
+                    try:
+                        start_s = int(parts[0])
+                        end_s = int(parts[1])
+                        
+                        sentences.append({
+                            "session_id": current_session,
+                            "start_samples": start_s,
+                            "end_samples": end_s,
+                            "start": start_s / config.VAD_SAMPLING_RATE,
+                            "end": end_s / config.VAD_SAMPLING_RATE,
+                            "text": parts[2],
+                            "timestamp": current_session
+                        })
+                        sentence_counter += 1
+                    except ValueError:
+                        continue
+                
+                if len(sentences) >= count:
+                    break
+    except IOError as e:
         logger.error(f"Error reading transcript file: {e}")
         
     return sentences
@@ -219,6 +211,7 @@ def process_sentences() -> bool:
     logger.info(f"Window full! Processing {len(window_data)} segments starting at index {current_index}...")
     
     # Pass indices to Gemini for precise range tracking
+    # We explicitly only send the 'text' field, which has timestamps already stripped during file read
     combined_text = "\n".join([f"[{i}] {s['text']}" for i, s in enumerate(window_data)])
     
     # Segment into stories using Gemini
@@ -230,9 +223,9 @@ def process_sentences() -> bool:
     
     logger.info(f"Gemini returned {len(stories)} raw stories")
     
-    # Wait after segmentation call (LLM rate limits)
-    logger.info(f"Waiting {config.LLM_RATE_LIMIT_DELAY_S} seconds for LLM rate limit...")
-    time.sleep(config.LLM_RATE_LIMIT_DELAY_S)
+    # Do not stall for rate limit; assume that it will take longer to fill the window
+    # logger.info(f"Waiting {config.LLM_RATE_LIMIT_DELAY_S} seconds for LLM rate limit...")
+    # time.sleep(config.LLM_RATE_LIMIT_DELAY_S)
     
     # Function to get text from indexed range
     def reconstruct_story_data(s):
@@ -316,22 +309,32 @@ def process_sentences() -> bool:
             
         # Prepare detailed metadata for audio clipping
         try:
-            from datetime import datetime
-            # Reconstruct absolute datetimes from parts
-            # parts[1] is HHMMSS.ss
-            def parts_to_iso(date_str, hhmmss_ss):
-                h, m, s = int(hhmmss_ss[:2]), int(hhmmss_ss[2:4]), int(hhmmss_ss[4:6])
-                ms = int(hhmmss_ss[7:9]) * 10000 if "." in hhmmss_ss else 0
-                dt = datetime(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8]), h, m, s, ms)
-                return dt.isoformat()
-
-            start_iso = parts_to_iso(matching_segments[0]["date"], matching_segments[0]["start_hhmmss"])
-            end_iso = parts_to_iso(matching_segments[-1]["date"], matching_segments[-1]["end_hhmmss"])
+            from datetime import datetime, timedelta
+            
+            # The session_id is YYYYMMDD_HHMMSS
+            session_id = matching_segments[0]["session_id"]
+            start_samples = matching_segments[0]["start_samples"]
+            end_samples = matching_segments[-1]["end_samples"]
+            
+            session_id_clean = session_id.replace("kqed_", "") if session_id.startswith("kqed_") else session_id
+            try:
+                session_dt = datetime.strptime(session_id_clean, "%Y%m%d_%H%M%S_%f")
+            except ValueError:
+                try:
+                    session_dt = datetime.strptime(session_id_clean, "%Y%m%d_%H%M%S")
+                except ValueError:
+                    session_dt = datetime.now().replace(microsecond=0) # Last resort fallback
+            
+            start_iso = (session_dt + timedelta(seconds=start_samples / config.VAD_SAMPLING_RATE)).isoformat()
+            end_iso = (session_dt + timedelta(seconds=end_samples / config.VAD_SAMPLING_RATE)).isoformat()
             
             audio_info = json.dumps({
                 "start_time": start_iso,
                 "end_time": end_iso,
-                "duration": end_time - start_time
+                "start_samples": start_samples,
+                "end_samples": end_samples,
+                "session_id": session_id,
+                "duration": (end_samples - start_samples) / config.VAD_SAMPLING_RATE
             })
             db_timestamp = start_iso
         except (Exception) as e:

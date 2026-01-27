@@ -279,7 +279,7 @@ if __name__ == "__main__":
                                 segment_end_samples = segment_start_samples + buffer_samples
                                 text = transcribe(full_speech)
                                 if text.strip():
-                                    print(f"{segment_end_samples} {text}")
+                                    print(f"{text} \n{segment_end_samples} ",end='')
                                 speech_buffer = []
                                 vad_iterator.reset_states()
                                 recording = False
@@ -294,7 +294,7 @@ if __name__ == "__main__":
                                 segment_end_samples = segment_start_samples + buffer_samples
                                 text = transcribe(full_speech)
                                 if text.strip():
-                                    print(f"{segment_end_samples} {text}")
+                                    print(f"{text} \n{segment_end_samples} ",end='')
                                 speech_buffer = []
                                 vad_iterator.reset_states()
                                 recording = False
@@ -307,7 +307,7 @@ if __name__ == "__main__":
                                     segment_end_samples = segment_start_samples + buffer_samples
                                     text = transcribe(full_speech)
                                     if text.strip():
-                                        print(f"{segment_end_samples} {text}")
+                                        print(f"{text} \n{segment_end_samples} ", end='')
                                 last_refresh_time = time.time()
 
                         if not recording:

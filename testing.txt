@@ -1,0 +1,28 @@
+# sample counts are super precise at only having the new text
+minus last line. however, hard to remove the last segment if it changed (which is whole point)
+should we just reduce buffer size? then cutoff problem and less context
+
+Successful and Louisiana, very successful in. 
+57344 Louisville, which I, I shared with him, but. 
+98304 I did not shoot anybody. 
+148480 I did not shoot anybody there, and the presence was much smaller. 
+181760 I still not shoot anybody there, and the presence was much smaller and much more targeted.
+214528 I did not shoot anybody there, and the presence was much smaller and much more targeted. Home and as a Trump administration.
+247296 I should not shoot anybody there, and the presence was much smaller and much more targeted. Home and as the Trump administration's borders are, in a veteran of immigrant.
+280576 I should not shoot anybody there, and the presence was much smaller and much more targeted. Home and as the Trump administration's borders are, and a veteran of immigration and customs enforcement.
+313344 I should not shoot anybody there, and the presence was much smaller and much more targeted. Home and as a Trump administration, supporters are, in a veteran of immigration and customs enforcement, he is to arrive in Minnesota.       
+342016 Tuesday to take charge, Welles also also 
+378880 Tuesday to take charge, Wallace also confirmed that Greg Babino. 
+412160 Tuesday to take charge, Wallace also confirmed that Greg Babino, the top border patrol official who
+444928 Tuesday to take charge, Wallace also confirmed that Gregg Babino, the top border patrol official, who's been leading the surge of emigration.
+478208 Tuesday to take charge, Wallace also confirmed that Gregg Babino, the top border patrol official, who's been leading the surge of immigration agents, will be leaving the state.
+510464 Tuesday to take charge, Walce also confirmed that Gregg Babino, the top border patrol official, who's been leading the surge of immigration agents, will be leaving the state. Babino provoked anger when.
+543744 Tuesday to take charge, Walce also confirmed that Gregg Babino, the top border patrol official, who's been leading the surge of immigration agents, will be leaving the state. Babino provoked anger when he referred to border patrol.  
+570880 Paul agents as the victims in Saturday. 
+609792 Joel Agents has the victims and Saturday's fatal shooting of 37,000. 
+642560 Joel Agents as the victims in Saturday's fatal shooting of 37-year-old ICU nurse Alex Presley.
+675328 Joel Agents as the victims in Saturday's fatal shooting of 37-year-old ICU nurse Alex Pretty from Member Station KOA
+708608 Joel Agents as the victims in Saturday's fatal shooting of thirty seven year old Icu Nurse Alex Pretty from member station Kos Uline O'ramsi reports that Ogle
+741376 Joel Agents, as the victims in Saturday's fatal shooting of thirty seven year old I see Unerce Alex Pretty from member station Kos, U, Lionel Ramsey reports that Oklahoma Republican Governor Kevin St.
+774144 Joel Agents, as the victims in Saturday's fatal shooting of thirty seven year old I see Unerce Alex Pretty, from member station Kos U. Lionel Ramsey reports that Oklahoma Republican Governor Kevin Stitt is among some Republicans.    
+798720 It's all erasing. 

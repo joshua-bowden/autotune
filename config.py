@@ -66,7 +66,6 @@ EMBEDDING_DIMENSIONS: int = 768  # text-embedding-004 dimension
 
 # Application - Core
 STREAM_URL: str = "https://streams.kqed.org/"
-CHUNK_DURATION: int = 60
 
 # VAD (Voice Activity Detection) - Controls speech/silence detection
 VAD_SAMPLING_RATE: int = 16000  # Samples per second (16kHz required by Silero/Moonshine)
@@ -79,26 +78,22 @@ VAD_THRESHOLD: float = 0.5       # Speech probability threshold (0.0 to 1.0)
 # When a "start" event happens, we prepend these chunks to capture leading consonants/sounds.
 LOOKBACK_CHUNKS: int = 40 
 
-# Forces a transcription even if the speaker hasn't stopped talking.
-# Prevents memory blowup and huge transcription offsets during long monologues.
-MAX_SEGMENT_DURATION_S: float = 30.0 
-
 # Live Mode settings
 LIVE_MIN_REFRESH_S: float = 0.2
 LIVE_MAX_SPEECH_S: float = 15.0
+SLIDING_BUFFER_SECS: float = 5.0  # Keep drafts from last N seconds for timestamping
 
-TRANSCRIPTION_WORKERS: int = 3 # Parallel transcription threads
-ENGINE_HEARTBEAT_INTERVAL_S: int = 30
-# Frame-aligned archival: 16kHz * 60s = 960k samples. Next 576nd multiple is 960,192 (1667 frames)
+# Frame-aligned archival: 16kHz * 60s = 960,000 samples. 
+# 960,000 is exactly 1875 chunks of 512 samples.
 # Ensures file-to-file contiguity without losing or repeating samples.
-SAMPLES_PER_ARCHIVE: int = 960192 
+SAMPLES_PER_ARCHIVE: int = 960000 
 
 # Story Processing (processor.py)
-WINDOW_SIZE_SENTENCES: int = 20
-OVERLAP_SENTENCES: int = 5
+WINDOW_SIZE_SENTENCES: int = 1000
+OVERLAP_SENTENCES: int = 0
 MIN_STORY_LENGTH: int = 10  # Minimum characters for a valid story
 MONITOR_INTERVAL_S: int = 5  # Seconds between directory scans
-GEMINI_STORY_MODEL: str = "gemini-2.5-flash-lite"
+GEMINI_STORY_MODEL: str = "gemini-2.5-flash"
 LLM_RATE_LIMIT_DELAY_S: int = 12 # Seconds to wait between Gemini calls
 
 # Search & Clipping (search.py)
@@ -118,6 +113,7 @@ TRANSCRIPT_DIR: Path = DATA_DIR / "transcripts"
 STORY_DIR: Path = DATA_DIR / "stories"
 RESULTS_DIR: Path = DATA_DIR / "search"
 PERS_DIR: Path = DATA_DIR / "personalization"
+PLAYGROUND_DIR: Path = DATA_DIR / "playground"
 
 
 def initialize_directories() -> None:
@@ -127,6 +123,7 @@ def initialize_directories() -> None:
     STORY_DIR.mkdir(parents=True, exist_ok=True)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     PERS_DIR.mkdir(parents=True, exist_ok=True)
+    PLAYGROUND_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # Initialize directories on module import
