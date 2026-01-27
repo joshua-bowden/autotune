@@ -70,7 +70,7 @@ def segment_transcripts(combined_text: str) -> Optional[List[Dict[str, str]]]:
         - "adjectives": 5 adjectives to describe the how a person would feel after hearing this story.
         - "start_index": The index [i] of the first sentence of the story.
         - "end_index": The index [i] of the last sentence of the story.
-    3. Ignore filler sentences, ads, or station IDs between stories.
+    3. A story should not consist of filler sentences, ads, or station IDs.
     4. Ensure the output is a valid JSON array of objects.
     
     Transcript sentences:
@@ -369,7 +369,7 @@ def process_sentences() -> bool:
     # Update index (sliding window: shift by window_size - overlap)
     new_index = current_index + (config.WINDOW_SIZE_SENTENCES - config.OVERLAP_SENTENCES)
     save_processed_index(new_index)
-    logger.info(f"Advanced index to {new_index}")
+    logger.info(f"Advanced processing_state.jsonindex to {new_index}")
     
     return True
 

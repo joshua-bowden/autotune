@@ -81,7 +81,8 @@ LOOKBACK_CHUNKS: int = 40
 # Live Mode settings
 LIVE_MIN_REFRESH_S: float = 0.2
 LIVE_MAX_SPEECH_S: float = 15.0
-SLIDING_BUFFER_SECS: float = 5.0  # Keep drafts from last N seconds for timestamping
+# Duration of continuous VAD silence before annotating transcript
+SILENCE_ANNOUNCE_S: float = 3.0
 
 # Frame-aligned archival: 16kHz * 60s = 960,000 samples. 
 # 960,000 is exactly 1875 chunks of 512 samples.
@@ -89,11 +90,11 @@ SLIDING_BUFFER_SECS: float = 5.0  # Keep drafts from last N seconds for timestam
 SAMPLES_PER_ARCHIVE: int = 960000 
 
 # Story Processing (processor.py)
-WINDOW_SIZE_SENTENCES: int = 1000
+WINDOW_SIZE_SENTENCES: int = 100
 OVERLAP_SENTENCES: int = 0
 MIN_STORY_LENGTH: int = 10  # Minimum characters for a valid story
 MONITOR_INTERVAL_S: int = 5  # Seconds between directory scans
-GEMINI_STORY_MODEL: str = "gemini-2.5-flash"
+GEMINI_STORY_MODEL: str = "gemini-2.5-flash-lite"
 LLM_RATE_LIMIT_DELAY_S: int = 12 # Seconds to wait between Gemini calls
 
 # Search & Clipping (search.py)
@@ -103,7 +104,7 @@ CLIP_PADDING_MS: int = 0
 
 # Personalization (personalization.py)
 PERS_BEEP_FREQ_HZ: int = 1000
-PERS_BEEP_DURATION_MS: int = 2000
+PERS_BEEP_DURATION_MS: int = 1000
 PERS_BEEP_GAIN_DB: int = -20
 
 # Directory Configuration

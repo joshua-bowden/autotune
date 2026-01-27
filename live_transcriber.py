@@ -101,6 +101,8 @@ class LiveTranscriberEngine:
         
         self.last_refresh_time = time.time()
         self.lookback_buffer = deque(maxlen=config.LOOKBACK_CHUNKS)
+        # Track when we last wrote a long-silence marker so we don't spam
+        self.last_silence_annotated_samples = 0
 
     def save_archive_chunk(self):
         """Encodes the current PCM buffer to MP3 and saves it, anchored to the stream start."""
@@ -207,9 +209,24 @@ class LiveTranscriberEngine:
                         if speech_dict:
                             # Start of speech detection
                             if "start" in speech_dict and not self.recording:
-                                self.recording = True
-                                # Use exact sample offset from VAD for start
+                                # We are transitioning from silence -> speech.
+                                # If there was a long enough silent span since the last speech,
+                                # annotate it now using the full duration.
                                 vad_start_abs = self.vad_base_samples + int(speech_dict["start"])
+                                if self.last_speech_sample > 0 and self.last_silence_annotated_samples < self.last_speech_sample:
+                                    silence_samples = max(0, vad_start_abs - self.last_speech_sample)
+                                    if silence_samples >= config.SILENCE_ANNOUNCE_S * config.VAD_SAMPLING_RATE:
+                                        session_ts = self.session_start.strftime("%y%m%d_%H%M%S") if self.session_start else datetime.now().strftime("%y%m%d_%H%M%S")
+                                        secs = silence_samples / float(config.VAD_SAMPLING_RATE)
+                                        write_to_transcript(
+                                            session_ts,
+                                            self.last_speech_sample,
+                                            vad_start_abs,
+                                            f"NO SPEECH DETECTED FOR {secs:.1f} SEC",
+                                        )
+                                        self.last_silence_annotated_samples = vad_start_abs
+
+                                self.recording = True
                                 lookback_samples = sum(len(c) for c in self.lookback_buffer)
                                 
                                 # CLAMP LOOKBACK: Ensure we don't overlap with the previous segment
