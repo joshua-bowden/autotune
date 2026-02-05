@@ -68,7 +68,7 @@ def main():
         lines = f.readlines()
 
     if LIMIT:
-        lines = lines[:LIMIT]
+        lines = lines[LIMIT:]
 
     active_session = None
     for i, line in enumerate(lines):

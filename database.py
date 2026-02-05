@@ -207,6 +207,47 @@ def search_stories(query_embedding: List[float], top_k: int = 5) -> List[Dict[st
         return []
 
 
+def get_all_stories_with_embeddings() -> List[Dict[str, Any]]:
+    """
+    Fetch all stories with their embeddings for in-memory distance computation.
+
+    Returns:
+        List of dicts with id, embedding (list of floats), summary, transcript, audio_path.
+        Embedding may be returned as string by driver; caller should normalize.
+    """
+    import json
+    sql = """
+    SELECT id, embedding, summary, transcript, audio_path
+    FROM radio_stories
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            cursor.close()
+            out = []
+            for r in rows:
+                emb = r["embedding"]
+                if isinstance(emb, str):
+                    emb = json.loads(emb)
+                elif hasattr(emb, "tolist"):
+                    emb = emb.tolist()
+                else:
+                    emb = list(emb)
+                out.append({
+                    "id": r["id"],
+                    "embedding": list(emb),
+                    "summary": r["summary"],
+                    "transcript": r["transcript"],
+                    "audio_path": r["audio_path"],
+                })
+            return out
+    except MySQLError as e:
+        logger.error(f"Error fetching stories with embeddings: {e}")
+        return []
+
+
 def get_story_count() -> int:
     """
     Get the total number of stories in the database.

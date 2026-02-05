@@ -63,6 +63,7 @@ TIDB_CA_PATH: str = str(BASE_DIR / "tidb.pem")
 # Gemini Configuration
 GOOGLE_API_KEY: str = get_env_variable("GOOGLE_API_KEY")
 EMBEDDING_DIMENSIONS: int = 768  # text-embedding-004 dimension
+BATCH_EMBEDDING_SIZE: int = 100 # Maximum number of embeddings to generate in a single batch
 
 # Application - Core
 STREAM_URL: str = "https://streams.kqed.org/"
@@ -94,7 +95,7 @@ WINDOW_SIZE_SENTENCES: int = 500
 OVERLAP_SENTENCES: int = 0
 MIN_STORY_LENGTH: int = 10  # Minimum characters for a valid story
 MONITOR_INTERVAL_S: int = 5  # Seconds between directory scans
-GEMINI_STORY_MODEL: str = "gemini-2.5-flash-lite"
+GEMINI_STORY_MODEL: str = "gemini-2.5-flash"
 LLM_RATE_LIMIT_DELAY_S: int = 12 # Seconds to wait between Gemini calls
 
 # Search & Clipping (search.py)

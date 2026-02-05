@@ -151,10 +151,10 @@ def get_batch_embeddings(
     model: str = "text-embedding-004"
 ) -> Optional[List[List[float]]]:
     """
-    Generate embeddings for multiple texts in a single API call.
+    Generate embeddings for multiple texts, batching them if necessary.
     
-    This is more efficient than calling get_embedding() multiple times
-    as it uses only one API request.
+    Splits the texts into chunks of size config.BATCH_EMBEDDING_SIZE to avoid
+    exceeding API limits, while still efficient.
     
     Args:
         texts: List of texts to embed
@@ -162,29 +162,48 @@ def get_batch_embeddings(
         model: Embedding model to use
         
     Returns:
-        List of embedding vectors, or None if generation fails
+        List of embedding vectors, or None if generation fails for any batch
     """
     logger = setup_logging(__name__)
     
     if not texts:
         return []
+        
+    all_embeddings = []
     
-    # Batch embedding still counts as 1 API request
-    if not _usage_tracker.check_and_increment():
-        logger.error("Batch embedding generation skipped due to rate limit")
-        return None
+    # Process in chunks
+    chunk_size = config.BATCH_EMBEDDING_SIZE
+    total_chunks = (len(texts) + chunk_size - 1) // chunk_size
     
-    try:
-        client = genai.Client(api_key=config.GOOGLE_API_KEY)
-        response = client.models.embed_content(
-            model=model,
-            contents=texts,
-            config=types.EmbedContentConfig(task_type=task_type)
-        )
-        return [e.values for e in response.embeddings]
-    except Exception as e:
-        logger.error(f"Error generating batch embeddings: {e}")
-        return None
+    for i in range(0, len(texts), chunk_size):
+        chunk_texts = texts[i : i + chunk_size]
+        chunk_num = (i // chunk_size) + 1
+        
+        # Check rate limits for each batch call
+        if not _usage_tracker.check_and_increment():
+            logger.error(f"Batch embedding generation skipped chunk {chunk_num}/{total_chunks} due to rate limit")
+            return None
+        
+        try:
+            client = genai.Client(api_key=config.GOOGLE_API_KEY)
+            response = client.models.embed_content(
+                model=model,
+                contents=chunk_texts,
+                config=types.EmbedContentConfig(task_type=task_type)
+            )
+            
+            # Append results from this chunk
+            if hasattr(response, 'embeddings') and response.embeddings:
+                all_embeddings.extend([e.values for e in response.embeddings])
+            else:
+                logger.error(f"No embeddings returned for chunk {chunk_num}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error generating batch embeddings for chunk {chunk_num}: {e}")
+            return None
+            
+    return all_embeddings
 
 
 def reset_usage_tracker() -> None:

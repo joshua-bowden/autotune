@@ -69,14 +69,13 @@ def segment_transcripts(combined_text: str) -> Optional[List[Dict[str, str]]]:
     If it is story-relevant, include it in the story.
 
     CRITICAL INSTRUCTIONS:
-    1. If the transcript contains multiple stories that satisfy this criteria, split them into separate story objects.
+    1. Every line should be included in a story. Return a list of separate story objects.
     2. For each complete story, provide:
         - "summary": A concise title or 1-sentence summary of the story/topic. Should be isolated enough to not need "and".
         - "adjectives": 5 adjectives to describe the how a person would feel after hearing this story.
         - "start_index": The index [i] of the first sentence of the story.
         - "end_index": The index [i] of the last sentence of the story.
-    3. A story should not consist of filler sentences, ads, or station IDs.
-    4. Ensure the output is a valid JSON array of objects.
+    3. Ensure the output is a valid JSON array of objects.
     
     Transcript sentences:
     {combined_text}
@@ -391,6 +390,8 @@ def segment_and_process_stories() -> None:
     try:
         while True:
             # Process sentences if enough are available
+            # print(f"running without processing stories")
+            # processed = False
             processed = process_sentences()
             
             # If nothing was processed, wait a bit
