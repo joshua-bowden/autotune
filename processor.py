@@ -25,7 +25,7 @@ from google.genai import types
 
 import config
 import database
-from utils import setup_logging, get_batch_embeddings
+from utils import setup_logging, get_batch_embeddings, _build_embed_chunks
 
 
 logger = setup_logging(__name__)
@@ -38,6 +38,7 @@ GEMINI_MODEL = config.GEMINI_STORY_MODEL
 
 TRANSCRIPT_FILE = config.TRANSCRIPT_DIR / "current_transcript.txt"
 STORIES_LOG_FILE = config.STORY_DIR / "stories_log.jsonl"
+LLM_STORIES_BATCH_FILE = config.STORY_DIR / "llm_stories_batch.jsonl"  # LLM-returned stories persisted before embedding/DB
 STATE_FILE = config.DATA_DIR / "processing_state.json"
 
 
@@ -55,24 +56,16 @@ def segment_transcripts(combined_text: str) -> Optional[List[Dict[str, str]]]:
     """
     prompt = f"""
     You are an editor for a radio station.
-    Below is a transcript of a continuous live radio feed, provided as a numbered list of sentence fragments. 
+    Below is a transcript of a continuous live radio feed. 
     
-    Your goal is identifying sharp, complete stories that can stand alone as a short radio highlight clip.
-    A proper story is a hook that introduces the topic, talks briefly about it, and leaves the listener wanting to hear more.
-    A story should be less than 10 sentences long.
-    
-    While there are likely transcription errors, make sure that your selected story starts with good grammar
-    at the beginning of a sentence and ends at the end of a sentence.
-
-    If there is a NO TEXT DETECTED FOR X SEC, it may be story-relevant noise that can be very engaging.
-    Look before and after to deduce if it is filler noise or story-relevant.
-    If it is story-relevant, include it in the story.
+    Your goal is identifying complete stories that stand alone as a story.
+    All consecutive information should be included in a single story. Include things like speaker introductions and outros.
 
     CRITICAL INSTRUCTIONS:
     1. Every line should be included in a story. Return a list of separate story objects.
     2. For each complete story, provide:
         - "summary": A concise title or 1-sentence summary of the story/topic. Should be isolated enough to not need "and".
-        - "adjectives": 5 adjectives to describe the how a person would feel after hearing this story.
+        - "category": Categorize the story into "major news", "highlight", "think piece", "journey of discovery", or "filler".
         - "start_index": The index [i] of the first sentence of the story.
         - "end_index": The index [i] of the last sentence of the story.
     3. Ensure the output is a valid JSON array of objects.
@@ -206,6 +199,31 @@ def log_story(story_json: Dict[str, Any]) -> None:
         logger.error(f"Error logging story to file: {e}")
 
 
+def save_llm_stories_batch(
+    window_start: int,
+    window_end: int,
+    stories: List[Dict[str, Any]],
+) -> None:
+    """
+    Persist LLM-returned stories to a text file so they are not in limbo.
+    Called right after we get valid_stories; transcript line counter is incremented after this.
+    Each line is JSON: {"window_start": int, "window_end": int, "stories": [...]}.
+    """
+    try:
+        config.STORY_DIR.mkdir(parents=True, exist_ok=True)
+        record = {
+            "window_start": window_start,
+            "window_end": window_end,
+            "stories": stories,
+        }
+        with open(LLM_STORIES_BATCH_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        logger.info(f"Stored {len(stories)} LLM stories to {LLM_STORIES_BATCH_FILE.name} (window {window_start}->{window_end})")
+    except IOError as e:
+        logger.error(f"Error saving LLM stories batch to file: {e}")
+        raise
+
+
 def process_sentences() -> bool:
     """
     Process a window of sentences using Gemini.
@@ -279,102 +297,101 @@ def process_sentences() -> bool:
     
     logger.info(f"Found {len(valid_stories)} valid stories")
     
-    # Collect all story blobs for batch embedding
+    new_index = current_index + (config.WINDOW_SIZE_SENTENCES - config.OVERLAP_SENTENCES)
+    save_llm_stories_batch(current_index, new_index, valid_stories)
+    save_processed_index(new_index)
+    logger.info(f"Advanced transcript line index to {new_index}")
+    
+    # Build story blobs and chunk by char limit (same as embedding API)
     story_blobs = []
     for story in valid_stories:
-        # Normalize fields
         for field in ["text", "summary", "adjectives"]:
             if isinstance(story.get(field), list):
                 story[field] = " ".join([str(x) for x in story[field]])
         story_blobs.append(json.dumps(story, ensure_ascii=False))
     
-    # Generate all embeddings in one batch call (efficient)
-    logger.info(f"Generating batch embeddings for {len(story_blobs)} stories...")
-    all_embeddings = get_batch_embeddings(story_blobs)
-    
-    if not all_embeddings or len(all_embeddings) != len(valid_stories):
-        logger.error("Failed to generate batch embeddings")
-        return False
+    chunks_blobs = _build_embed_chunks(story_blobs, config.EMBED_BATCH_MAX_CHARS)
+    total_chunks = len(chunks_blobs)
+    start_idx = 0
+    total_saved = 0
 
-    # Process each story and save to DB
-    for idx, story in enumerate(valid_stories):
-        story_blob = story_blobs[idx]
-        embedding = all_embeddings[idx]
-        story_text = story.get("text", "").strip()
-        
-        # Use the segments we retrieved via indices
-        matching_segments = story.get("matching_segments", [])
-        
-        if matching_segments:
-            start_time = min(s["start"] for s in matching_segments)
-            end_time = max(s["end"] for s in matching_segments)
-            base_timestamp = matching_segments[0]["timestamp"]
-        else:
-            # Should not happen with new logic
-            start_time = window_data[0]["start"]
-            end_time = window_data[-1]["end"]
-            base_timestamp = window_data[0]["timestamp"]
+    for chunk_num, chunk_blobs in enumerate(chunks_blobs, start=1):
+        chunk_stories = valid_stories[start_idx : start_idx + len(chunk_blobs)]
+        start_idx += len(chunk_blobs)
 
-        # Log to file with pretty formatting
-        log_story(story)
+        logger.info(f"Embedding chunk {chunk_num}/{total_chunks} ({len(chunk_blobs)} stories)...")
+        chunk_embeddings = get_batch_embeddings(chunk_blobs)
+        if not chunk_embeddings or len(chunk_embeddings) != len(chunk_stories):
+            logger.error("Failed to generate batch embeddings for chunk %s", chunk_num)
+            return False
 
-        if embedding is None:
-            logger.warning(f"Failed to generate embedding for story, skipping storage")
-            continue
-            
-        # Prepare detailed metadata for audio clipping
-        try:
-            # Session ID (prefer per-line timestamp-derived session_id)
-            session_id = matching_segments[0].get("session_id") or "unknown"
-            start_samples = matching_segments[0]["start_samples"]
-            end_samples = matching_segments[-1]["end_samples"]
-            
-            session_id_clean = session_id.replace("kqed_", "") if session_id.startswith("kqed_") else session_id
+        # Save this chunk to DB immediately.
+        # transcript = same text we embedded (may be truncated to EMBED_BATCH_MAX_CHARS for long stories).
+        # Audio refs (start_time, end_time, audio_path) are always the full story segment for search/personalization.
+        for idx, story in enumerate(chunk_stories):
+            story_blob = chunk_blobs[idx]
+            embedding = chunk_embeddings[idx]
+            matching_segments = story.get("matching_segments", [])
+
+            if matching_segments:
+                start_time = min(s["start"] for s in matching_segments)
+                end_time = max(s["end"] for s in matching_segments)
+            else:
+                start_time = window_data[0]["start"]
+                end_time = window_data[-1]["end"]
+
+            log_story(story)
+            if embedding is None:
+                logger.warning("Failed to generate embedding for story, skipping storage")
+                continue
+
             try:
-                session_dt = datetime.strptime(session_id_clean, "%Y%m%d_%H%M%S_%f")
-            except ValueError:
+                session_id = matching_segments[0].get("session_id") or "unknown"
+                start_samples = matching_segments[0]["start_samples"]
+                end_samples = matching_segments[-1]["end_samples"]
+                session_id_clean = session_id.replace("kqed_", "") if session_id.startswith("kqed_") else session_id
                 try:
-                    session_dt = datetime.strptime(session_id_clean, "%Y%m%d_%H%M%S")
+                    session_dt = datetime.strptime(session_id_clean, "%Y%m%d_%H%M%S_%f")
                 except ValueError:
-                    session_dt = datetime.now().replace(microsecond=0) # Last resort fallback
-            
-            start_iso = (session_dt + timedelta(seconds=start_samples / config.VAD_SAMPLING_RATE)).isoformat()
-            end_iso = (session_dt + timedelta(seconds=end_samples / config.VAD_SAMPLING_RATE)).isoformat()
-            
-            audio_info = json.dumps({
-                "start_time": start_iso,
-                "end_time": end_iso,
-                "start_samples": start_samples,
-                "end_samples": end_samples,
-                "session_id": session_id,
-                "duration": (end_samples - start_samples) / config.VAD_SAMPLING_RATE
-            })
-            db_timestamp = start_iso
-        except (Exception) as e:
-            logger.warning(f"Failed to create detailed audio metadata: {e}")
-            audio_info = f"sliding_window_log:{STORIES_LOG_FILE.name}"
-            db_timestamp = datetime.now().isoformat()
-            
-        story_id = database.save_story(
-            timestamp=db_timestamp,
-            start_time=start_time,
-            end_time=end_time,
-            transcript=story_blob, # Store the full JSON chunk
-            summary=story.get("summary", ""),
-            audio_path=audio_info,
-            embedding=embedding
-        )
-        
-        if story_id is None:
-            logger.error(f"Failed to save story to database")
-        else:
-            logger.info(f"Saved story to database(ID: {story_id})")
-            
-    # Update index (sliding window: shift by window_size - overlap)
-    new_index = current_index + (config.WINDOW_SIZE_SENTENCES - config.OVERLAP_SENTENCES)
-    save_processed_index(new_index)
-    logger.info(f"Advanced processing_state.jsonindex to {new_index}")
-    
+                    try:
+                        session_dt = datetime.strptime(session_id_clean, "%Y%m%d_%H%M%S")
+                    except ValueError:
+                        session_dt = datetime.now().replace(microsecond=0)
+                start_iso = (session_dt + timedelta(seconds=start_samples / config.VAD_SAMPLING_RATE)).isoformat()
+                end_iso = (session_dt + timedelta(seconds=end_samples / config.VAD_SAMPLING_RATE)).isoformat()
+                audio_info = json.dumps({
+                    "start_time": start_iso,
+                    "end_time": end_iso,
+                    "start_samples": start_samples,
+                    "end_samples": end_samples,
+                    "session_id": session_id,
+                    "duration": (end_samples - start_samples) / config.VAD_SAMPLING_RATE
+                })
+                db_timestamp = start_iso
+            except Exception as e:
+                logger.warning("Failed to create detailed audio metadata: %s", e)
+                audio_info = f"sliding_window_log:{STORIES_LOG_FILE.name}"
+                db_timestamp = datetime.now().isoformat()
+
+            story_id = database.save_story(
+                timestamp=db_timestamp,
+                start_time=start_time,
+                end_time=end_time,
+                transcript=story_blob,
+                summary=story.get("summary", ""),
+                audio_path=audio_info,
+                embedding=embedding
+            )
+            if story_id is None:
+                logger.error("Failed to save story to database")
+            else:
+                total_saved += 1
+
+        if chunk_num < total_chunks:
+            logger.info("Chunk %s/%s saved; sleeping %s s before next embedding chunk", chunk_num, total_chunks, config.EMBED_BATCH_SLEEP_SECONDS)
+            time.sleep(config.EMBED_BATCH_SLEEP_SECONDS)
+
+    logger.info("Saved %s stories to database", total_saved)
     return True
 
 

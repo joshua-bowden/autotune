@@ -154,7 +154,7 @@ def save_story(
             conn.commit()
             story_id = cursor.lastrowid
             cursor.close()
-            logger.info(f"Story saved to database (ID: {story_id})")
+            # logger.info(f"Story saved to database (ID: {story_id})")
             return story_id
     except MySQLError as e:
         logger.error(f"Error saving story to database: {e}")

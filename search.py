@@ -227,7 +227,7 @@ def search_stories(query: str, top_k: int = DEFAULT_TOP_K) -> None:
     """
     logger.info(f"Searching for: '{query}' (top_k={top_k})")
 
-    embedding = get_embedding(query, task_type="RETRIEVAL_QUERY")
+    embedding = get_embedding(query)
     if embedding is None:
         logger.error("Failed to generate embedding for query")
         print("Error: Could not process your query. Please try again.")

@@ -111,98 +111,128 @@ _usage_tracker = UsageTracker()
 
 def get_embedding(
     text: str,
-    task_type: str = "RETRIEVAL_DOCUMENT",
-    model: str = "text-embedding-004"
+    model: str = "gemini-embedding-001"
 ) -> Optional[List[float]]:
     """
     Generate embedding vector for text using Gemini API.
-    
-    Args:
-        text: Text to embed
-        task_type: Embedding task type ("RETRIEVAL_DOCUMENT" or "RETRIEVAL_QUERY")
-        model: Embedding model to use
-        
-    Returns:
-        List of embedding values, or None if generation fails
+
+    Uses embed_content with contents=[text]; for single query/document embedding.
     """
     logger = setup_logging(__name__)
-    
-    # Check rate limits
+
     if not _usage_tracker.check_and_increment():
         logger.error("Embedding generation skipped due to rate limit")
         return None
-    
+
     try:
         client = genai.Client(api_key=config.GOOGLE_API_KEY)
-        response = client.models.embed_content(
+        result = client.models.embed_content(
             model=model,
-            contents=text,
-            config=types.EmbedContentConfig(task_type=task_type)
+            contents=[text],
+            config=types.EmbedContentConfig(output_dimensionality=config.EMBEDDING_DIMENSIONS),
         )
-        return response.embeddings[0].values
+        if not result.embeddings:
+            return None
+        emb = result.embeddings[0]
+        vals = emb.values if hasattr(emb, "values") and emb.values is not None else (list(emb.embedding) if hasattr(emb, "embedding") else None)
+        if vals is None:
+            return None
+        embedding_np = np.array(vals, dtype=float)
+        normed = embedding_np / np.linalg.norm(embedding_np)
+        return normed.tolist()
     except Exception as e:
         logger.error(f"Error generating embedding: {e}")
         return None
 
 
+def _build_embed_chunks(texts: List[str], max_chars: int) -> List[List[str]]:
+    """
+    Group texts (stories) into batches by character count.
+    Each story is added as a full unit—we never split a story across batches.
+    Stories longer than max_chars are truncated so no batch exceeds the limit.
+    Start a new batch when adding the next story would exceed max_chars.
+    """
+    log = logging.getLogger(__name__)
+    chunks: List[List[str]] = []
+    current: List[str] = []
+    current_chars = 0
+    for t in texts:
+        n = len(t)
+        if n > max_chars:
+            log.warning("Truncating one item from %s to %s chars (embed batch limit)", n, max_chars)
+            t = t[:max_chars]
+            n = max_chars
+        if current_chars + n > max_chars and current:
+            chunks.append(current)
+            current = []
+            current_chars = 0
+        current.append(t)
+        current_chars += n
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def get_batch_embeddings(
     texts: List[str],
-    task_type: str = "RETRIEVAL_DOCUMENT",
-    model: str = "text-embedding-004"
+    model: str = "gemini-embedding-001",
 ) -> Optional[List[List[float]]]:
     """
-    Generate embeddings for multiple texts, batching them if necessary.
-    
-    Splits the texts into chunks of size config.BATCH_EMBEDDING_SIZE to avoid
-    exceeding API limits, while still efficient.
-    
-    Args:
-        texts: List of texts to embed
-        task_type: Embedding task type
-        model: Embedding model to use
-        
-    Returns:
-        List of embedding vectors, or None if generation fails for any batch
+    Generate embeddings for multiple texts (stories) via embed_content(contents=[...]).
+
+    Stories are embedded as full units: we add stories to a batch until the next
+    would exceed EMBED_BATCH_MAX_TOKENS (15k), then send that batch. Waits
+    EMBED_BATCH_SLEEP_SECONDS between each API call to respect per-minute rate limit.
     """
     logger = setup_logging(__name__)
-    
+
     if not texts:
         return []
-        
-    all_embeddings = []
-    
-    # Process in chunks
-    chunk_size = config.BATCH_EMBEDDING_SIZE
-    total_chunks = (len(texts) + chunk_size - 1) // chunk_size
-    
-    for i in range(0, len(texts), chunk_size):
-        chunk_texts = texts[i : i + chunk_size]
-        chunk_num = (i // chunk_size) + 1
-        
-        # Check rate limits for each batch call
+
+    chunks = _build_embed_chunks(texts, config.EMBED_BATCH_MAX_CHARS)
+    total_chunks = len(chunks)
+    all_embeddings: List[List[float]] = []
+
+    for chunk_num, chunk_texts in enumerate(chunks, start=1):
         if not _usage_tracker.check_and_increment():
-            logger.error(f"Batch embedding generation skipped chunk {chunk_num}/{total_chunks} due to rate limit")
+            logger.error(
+                f"Batch embedding generation skipped chunk {chunk_num}/{total_chunks} due to rate limit"
+            )
             return None
-        
+
         try:
+            chunk_chars = sum(len(t) for t in chunk_texts)
+            logger.info("Embedding batch %s/%s: %s chars (%s items)", chunk_num, total_chunks, chunk_chars, len(chunk_texts))
             client = genai.Client(api_key=config.GOOGLE_API_KEY)
-            response = client.models.embed_content(
+            result = client.models.embed_content(
                 model=model,
                 contents=chunk_texts,
-                config=types.EmbedContentConfig(task_type=task_type)
+                config=types.EmbedContentConfig(output_dimensionality=config.EMBEDDING_DIMENSIONS),
             )
-            
-            # Append results from this chunk
-            if hasattr(response, 'embeddings') and response.embeddings:
-                all_embeddings.extend([e.values for e in response.embeddings])
-            else:
+            if not result.embeddings:
                 logger.error(f"No embeddings returned for chunk {chunk_num}")
                 return None
-                
+            for e in result.embeddings:
+                vals = getattr(e, "values", None)
+                if vals is None and hasattr(e, "embedding"):
+                    vals = list(e.embedding)
+                if vals is None:
+                    logger.error(f"Unknown embedding shape for chunk {chunk_num}")
+                    return None
+                embedding_np = np.array(vals, dtype=float)
+                normed = embedding_np / np.linalg.norm(embedding_np)
+                all_embeddings.append(normed.tolist())
+
+            if chunk_num < total_chunks:
+                logger.info(
+                    "Embedding chunk %s/%s done; sleeping %s s before next",
+                    chunk_num, total_chunks, config.EMBED_BATCH_SLEEP_SECONDS,
+                )
+                time.sleep(config.EMBED_BATCH_SLEEP_SECONDS)
         except Exception as e:
             logger.error(f"Error generating batch embeddings for chunk {chunk_num}: {e}")
             return None
-            
+
     return all_embeddings
 
 
