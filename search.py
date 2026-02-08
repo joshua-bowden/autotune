@@ -2,27 +2,28 @@
 Search module for the radio archiver system.
 
 This module provides a command-line interface for searching stored radio
-stories using semantic similarity. It converts user queries into embeddings
-and finds the most similar stories in the database.
+stories using semantic similarity. It converts user queries into embeddings,
+finds the top k matches, stitches their audio with beeps, and writes a report.
 
 Usage:
-    python search.py <query text>
-    
+    python search.py <top_k> <query text>
+
 Example:
-    python search.py climate change policy
+    python search.py 5 climate change policy
 """
 
 import logging
+import re
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import database
 import config
 import json
-import re
 from pydub import AudioSegment
+
 from utils import get_embedding, setup_logging
 
 
@@ -222,89 +223,139 @@ def format_search_results(results: List[Dict[str, Any]]) -> str:
 
 def search_stories(query: str, top_k: int = DEFAULT_TOP_K) -> None:
     """
-    Search for stories matching the query.
-    
-    Args:
-        query: Search query text
-        top_k: Number of results to return
+    Search for stories matching the query, stitch top k clips with beeps, and write a report.
     """
-    logger.info(f"Searching for: '{query}'")
-    
-    # Generate embedding for query
+    logger.info(f"Searching for: '{query}' (top_k={top_k})")
+
     embedding = get_embedding(query, task_type="RETRIEVAL_QUERY")
-    
     if embedding is None:
         logger.error("Failed to generate embedding for query")
         print("Error: Could not process your query. Please try again.")
         return
-    
-    # Search database
+
     results = database.search_stories(embedding, top_k=top_k)
-    
-    # Display results
     if not results:
         print("No results found.")
         return
-    
-    print(f"\nFound {len(results)} results:\n")
-    
+
+    # Build safe base filename from query and timestamp
+    safe_query = re.sub(r"[^\w\s-]", "", query).strip().replace(" ", "_")[:40]
+    timestamp = datetime.now().strftime("%d_%m_%Y_%H%M")
+    base_name = f"search_k{top_k}_{safe_query}_{timestamp}"
+
+    # Extract audio for each result and collect clip paths
+    clips = []
     for i, result in enumerate(results, 1):
         summary = result.get("summary", "No summary")
-        distance = result.get("distance", 0.0)
-        transcript = result.get("transcript", "")
         audio_path = result.get("audio_path", "{}")
         story_id = result.get("id")
-        
-        # Load and clip audio for ALL results
-        audio_saved_at = None
         try:
             audio_meta = json.loads(audio_path)
-            # Clip the audio for this story
             print(f"[{i}] Clipping audio for: {summary[:50]}...")
-            audio_saved_at = extract_audio_segment(
+            clip_path = extract_audio_segment(
                 story_id,
-                query=f"{query[:10]}_result{i}_s{story_id}",
+                query=f"{base_name}_result{i}_s{story_id}",
                 start_samples=audio_meta.get("start_samples"),
                 end_samples=audio_meta.get("end_samples"),
-                session_id=audio_meta.get("session_id")
+                session_id=audio_meta.get("session_id"),
             )
+            if clip_path:
+                clips.append(clip_path)
         except Exception as e:
             logger.debug(f"Could not clip audio for result {i}: {e}")
-        
-        # Parse full text
-        try:
-            # Transcript might be a JSON if it was stored as a blob
-            story_data = json.loads(transcript)
-            full_text = story_data.get("text", transcript)
-        except:
-            full_text = transcript
-        
-        print(f"{i}. {summary}")
-        print(f"   Similarity: {1 - distance:.4f}")
-        if audio_saved_at:
-            print(f"   Audio Clip: {audio_saved_at}")
-        print(f"   Transcript: {full_text.strip()}")
-        print("-" * 60)
+
+    if not clips:
+        logger.error("Failed to extract any audio clips.")
+        print("Error: Could not extract audio for the results.")
+        return
+
+    # Stitch clips with beeps (same as personalization)
+    from pydub.generators import Sine
+
+    beep = Sine(config.PERS_BEEP_FREQ_HZ).to_audio_segment(
+        duration=config.PERS_BEEP_DURATION_MS
+    ).apply_gain(config.PERS_BEEP_GAIN_DB)
+
+    combined = AudioSegment.empty()
+    segment_lengths_ms = []
+    for i, clip_path in enumerate(clips):
+        seg = AudioSegment.from_mp3(clip_path)
+        segment_lengths_ms.append(len(seg))
+        if i > 0:
+            combined += beep
+        combined += seg
+
+    # Save stitched MP3
+    results_dir = config.RESULTS_DIR
+    results_dir.mkdir(exist_ok=True)
+    output_audio = results_dir / f"{base_name}.mp3"
+    combined.export(str(output_audio), format="mp3")
+    logger.info(f"Stitched audio saved to: {output_audio}")
+
+    # Write report (same style as personalization)
+    output_text = results_dir / f"{base_name}.txt"
+    ids = [r.get("id") for r in results[: len(clips)]]
+    elapsed_ms = 0
+    with open(output_text, "w", encoding="utf-8") as f:
+        f.write("=== SEARCH RESULTS (TOP K STITCHED) ===\n")
+        f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+        f.write(f"Query: {query}\n")
+        f.write(f"Top k: {len(clips)}\n")
+        f.write(f"Story IDs (order): {ids}\n\n")
+
+        for i, result in enumerate(results[: len(clips)]):
+            story_id = result.get("id")
+            summary = result.get("summary", "No summary")
+            distance = result.get("distance", 0.0)
+            transcript = result.get("transcript", "")
+            marker = "START" if i == 0 else f"after {elapsed_ms / 1000.0:.2f}s (beep)"
+            f.write(f"--- STORY {i + 1} (ID: {story_id} | Position: {marker}) ---\n")
+            f.write(f"Similarity: {1 - distance:.4f}\n")
+            f.write(f"SUMMARY: {summary}\n")
+            try:
+                story_data = json.loads(transcript)
+                full_text = story_data.get("text", transcript)
+            except Exception:
+                full_text = transcript
+            f.write(f"TEXT: {full_text.strip()}\n\n")
+
+            elapsed_ms += segment_lengths_ms[i]
+            if i < len(clips) - 1:
+                elapsed_ms += config.PERS_BEEP_DURATION_MS
+
+    logger.info(f"Report saved to: {output_text}")
+    print(f"\nFound {len(clips)} results. Stitched audio and report written.")
+    print(f"Audio: {output_audio}")
+    print(f"Report: {output_text}")
 
 
 def main() -> None:
-    """Main entry point for the search CLI."""
-    if len(sys.argv) < 2:
-        print("Usage: python search.py <query>")
+    """Main entry point for the search CLI. Usage: python search.py <top_k> <query>"""
+    if len(sys.argv) < 3:
+        print("Usage: python search.py <top_k> <query>")
         print("\nExample:")
-        print("  python search.py climate change policy")
+        print("  python search.py 5 climate change policy")
         sys.exit(1)
-    
-    # Join all arguments as the query
-    query = " ".join(sys.argv[1:])
-    
+
     try:
-        search_stories(query)
+        top_k = int(sys.argv[1])
+    except ValueError:
+        print("Error: First argument must be a number (top k).")
+        sys.exit(1)
+
+    if top_k < 1:
+        print("Error: top_k must be at least 1.")
+        sys.exit(1)
+
+    query = " ".join(sys.argv[2:])
+
+    try:
+        search_stories(query, top_k=top_k)
     except KeyboardInterrupt:
         logger.info("Search interrupted by user")
     except Exception as e:
         logger.error(f"Unexpected error during search: {e}")
-        print(f"Error: An unexpected error occurred. Check logs for details.")
+        print("Error: An unexpected error occurred. Check logs for details.")
         sys.exit(1)
 
 
