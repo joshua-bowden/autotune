@@ -7,13 +7,14 @@ import json
 import math
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 from pydub import AudioSegment
 
 import database
 import config
 from search import extract_audio_segment
-from utils import setup_logging
+from utils import setup_logging, get_embedding
 
 logger = setup_logging(__name__)
 
@@ -38,12 +39,16 @@ def _cosine_distance(u, v):
     return 1.0 - _dot(u, v)
 
 
-def select_farthest_k(stories_with_embeddings, k):
+def select_farthest_k(stories_with_embeddings, k, first_story=None):
     """
     Select k stories that are maximally far from each other using greedy k-dispersion.
 
     Uses cosine distance (1 - cos_sim). At each step we add the story whose
     minimum distance to the already-selected set is largest.
+
+    If first_story is given (e.g. top query search result), it is fixed as the
+    first story and the remaining k-1 are chosen to be farthest from the set
+    (so diverse relative to the query hit).
 
     Returns:
         List of k story dicts (same shape as input items) in selection order.
@@ -55,13 +60,37 @@ def select_farthest_k(stories_with_embeddings, k):
     if k <= 0:
         return []
 
-    # Normalize embeddings so cosine_sim(a,b) = dot(a,b), cosine_distance = 1 - dot
+    if first_story is not None:
+        pool = [s for s in stories_with_embeddings if s["id"] != first_story["id"]]
+        if k == 1:
+            return [first_story]
+        if k - 1 >= len(pool):
+            return [first_story] + pool
+        norm_first = _normalize(first_story["embedding"])
+        norm_pool = [_normalize(s["embedding"]) for s in pool]
+        npool = len(pool)
+        selected_pool_indices = []
+        for _ in range(k - 1):
+            best_p = None
+            best_min_dist = -1.0
+            for p in range(npool):
+                if p in selected_pool_indices:
+                    continue
+                min_d = _cosine_distance(norm_pool[p], norm_first)
+                for i in selected_pool_indices:
+                    min_d = min(min_d, _cosine_distance(norm_pool[p], norm_pool[i]))
+                if min_d > best_min_dist:
+                    best_min_dist = min_d
+                    best_p = p
+            selected_pool_indices.append(best_p)
+        return [first_story] + [pool[i] for i in selected_pool_indices]
+
+    # No seed: greedy k-dispersion from farthest pair
     normalized = [_normalize(s["embedding"]) for s in stories_with_embeddings]
 
     def cos_dist(i, j):
         return _cosine_distance(normalized[i], normalized[j])
 
-    # Greedy: start with the pair with maximum cosine distance
     best_pair = (0, 1)
     best_dist = cos_dist(0, 1)
     for i in range(n):
@@ -72,8 +101,6 @@ def select_farthest_k(stories_with_embeddings, k):
                 best_pair = (i, j)
 
     selected_indices = list(best_pair)
-
-    # Add remaining k-2: each time add the story farthest from the current set
     for _ in range(k - 2):
         best_p = None
         best_min_dist = -1.0
@@ -89,8 +116,11 @@ def select_farthest_k(stories_with_embeddings, k):
     return [stories_with_embeddings[i] for i in selected_indices]
 
 
-def create_personalization(k: int = 2):
-    logger.info(f"Finding the {k} most different stories (greedy k-dispersion)...")
+def create_personalization(k: int = 2, query: Optional[str] = None):
+    if query:
+        logger.info(f"Query provided: first story = top embedding match, then {k - 1} farthest from it.")
+    else:
+        logger.info(f"Finding the {k} most different stories (greedy k-dispersion)...")
 
     stories = database.get_all_stories_with_embeddings()
     if not stories:
@@ -100,7 +130,20 @@ def create_personalization(k: int = 2):
         logger.warning("Need at least 2 stories.")
         return
 
-    selected = select_farthest_k(stories, k)
+    first_story = None
+    if query and query.strip():
+        query_embedding = get_embedding(query.strip())
+        if query_embedding is None:
+            logger.error("Failed to get embedding for query; falling back to no-query mode.")
+        else:
+            q_norm = _normalize(query_embedding)
+            first_story = min(
+                stories,
+                key=lambda s: _cosine_distance(_normalize(s["embedding"]), q_norm),
+            )
+            logger.info(f"Top query match: story ID {first_story['id']} — {first_story['summary'][:50]}...")
+
+    selected = select_farthest_k(stories, k, first_story=first_story)
     ids = [s["id"] for s in selected]
     logger.info(f"Selected story IDs (in order): {ids}")
 
@@ -162,7 +205,11 @@ def create_personalization(k: int = 2):
     # 4. Text report (use same segment lengths as combined audio)
     output_text = pers_dir / f"{base_filename}.txt"
     with open(output_text, "w", encoding="utf-8") as f:
-        f.write("=== SEMANTICALLY FARTHEST STORIES (GREEDY K-DISPERSION) ===\n")
+        if query and query.strip():
+            f.write("=== QUERY-DRIVEN: TOP MATCH + FARTHEST N-1 ===\n")
+            f.write(f"Query: {query.strip()}\n")
+        else:
+            f.write("=== SEMANTICALLY FARTHEST STORIES (GREEDY K-DISPERSION) ===\n")
         f.write(f"Timestamp: {datetime.now().isoformat()}\n")
         f.write(f"Number of stories: {k}\n")
         f.write(f"Story IDs (order): {ids}\n\n")
@@ -172,6 +219,7 @@ def create_personalization(k: int = 2):
             marker = "START" if i == 0 else f"after {elapsed_ms / 1000.0:.2f}s (beep)"
             f.write(f"--- STORY {i + 1} (ID: {story['id']} | Position: {marker}) ---\n")
             f.write(f"SUMMARY: {story['summary']}\n")
+            # transcript is plain story text (new) or legacy JSON with "text" key
             try:
                 story_data = json.loads(story["transcript"])
                 full_text = story_data.get("text", story["transcript"])
@@ -191,7 +239,8 @@ def create_personalization(k: int = 2):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Find N semantically farthest stories and create a combined audio + report."
+        description="Find N semantically farthest stories and create a combined audio + report. "
+        "If a query is given, the first story is the top embedding match, then the next n-1 are farthest from it."
     )
     parser.add_argument(
         "num",
@@ -200,7 +249,14 @@ if __name__ == "__main__":
         default=2,
         help="Number of stories to select (default: 2)",
     )
+    parser.add_argument(
+        "query",
+        type=str,
+        nargs="?",
+        default=None,
+        help="Optional query: first story will be the top embedding search result, then n-1 farthest from it.",
+    )
     args = parser.parse_args()
     if args.num < 2:
         parser.error("num must be at least 2")
-    create_personalization(k=args.num)
+    create_personalization(k=args.num, query=args.query)

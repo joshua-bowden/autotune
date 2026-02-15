@@ -94,12 +94,13 @@ SILENCE_ANNOUNCE_S: float = 3.0
 SAMPLES_PER_ARCHIVE: int = 960000 
 
 # Story Processing (processor.py)
-WINDOW_SIZE_SENTENCES: int = 500
-OVERLAP_SENTENCES: int = 0
 MIN_STORY_LENGTH: int = 10  # Minimum characters for a valid story
 MONITOR_INTERVAL_S: int = 5  # Seconds between directory scans
-GEMINI_STORY_MODEL: str = "gemini-2.5-flash-lite"
-LLM_RATE_LIMIT_DELAY_S: int = 12 # Seconds to wait between Gemini calls
+# Gemma 3 27B for story segmentation
+LLM_STORY_MODEL: str = "gemma-3-27b-it"
+LLM_CONTEXT_MAX_CHARS: int = 50_000  # Chunk transcript by chars; never split a line
+LLM_OVERLAP_MAX_CHARS: int = 10_000  # Overlap with end of previous chunk (whole lines)
+LLM_RATE_LIMIT_DELAY_S: int = 12  # Seconds to wait between LLM calls
 
 # Search & Clipping (search.py)
 SEARCH_DEFAULT_TOP_K: int = 2
